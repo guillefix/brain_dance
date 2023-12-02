@@ -3,7 +3,7 @@
 # Copyright (c) 2015, Vispy Development Team.
 # Distributed under the (new) BSD License. See LICENSE.txt for more info.
 
-## TAKEN FROM https://github.com/alexandrebarachant/muse-lsl basically 
+## TAKEN FROM https://github.com/alexandrebarachant/muse-lsl basically
 
 """
 Multiple real-time digital signals with GLSL-based clipping.
@@ -34,7 +34,8 @@ SHIFT_LENGTH = EPOCH_LENGTH - OVERLAP_LENGTH
 
 # Index of the channel(s) (electrodes) to be used
 # 0 = left ear, 1 = left forehead, 2 = right forehead, 3 = right ear
-INDEX_CHANNEL = [0]
+# INDEX_CHANNEL = [0]
+INDEX_CHANNEL = [3]
 
 class Band:
     Delta = 0
@@ -126,18 +127,27 @@ class Canvas(app.Canvas):
         window = 10
         self.sfreq = info.nominal_srate()
         n_samples = int(self.sfreq * window)
-        # self.n_chans = info.channel_count()
-        self.n_chans = info.channel_count() + 1
+        self.n_chans = info.channel_count()
+        # self.n_chans = info.channel_count() + 1
+
+        self.n_metrics = 1
+        self.n_feats = self.n_chans + self.n_metrics
 
         ch = description.child('channels').first_child()
         ch_names = [ch.child_value('label')]
 
-        for i in range(self.n_chans):
+        # print(self.n_chans)
+        for i in range(self.n_chans - 1):
             ch = ch.next_sibling()
             ch_names.append(ch.child_value('label'))
 
+        for i in range(self.n_metrics):
+            ch_names.append("Feat")
+
+        print(ch_names)
+
         # Number of cols and rows in the table.
-        n_rows = self.n_chans
+        n_rows = self.n_feats
         n_cols = 1
 
         # Number of signals.
@@ -185,22 +195,34 @@ class Canvas(app.Canvas):
         self.font_size = 48.
         self.names = []
         self.quality = []
-        for ii in range(self.n_chans):
+        for ii in range(len(ch_names)):
             text = visuals.TextVisual(ch_names[ii], bold=True, color='white')
+            # print(text.text)
             self.names.append(text)
+            # self.names[ii].pos *= np.array([0,0.5,0])
+            # self.names[ii].pos += np.array([0,-100000,0])
             text = visuals.TextVisual('', bold=True, color='white')
             self.quality.append(text)
 
         self.quality_colors = color_palette("RdYlGn", 11)[::-1]
 
-        self.scale = scale
+        self.scale = np.array([100 for i in range(self.n_feats)])
+        # self.scale = scale
+        # self.scale = np.expand_dims(self.scale, 0)
+        self.scale[-1] = 1
+        self.scale[-2] = 1000
+        self.scale[-3] = 1000
+        self.scale[-4] = 1000
+        self.scale[-5] = 1000
+
+        self.scale[0] = 2
         self.n_samples = n_samples
         self.filt = filt
         self.af = [1.0]
 
         # self.data_f = np.zeros((n_samples, self.n_chans))
-        self.data_f = np.zeros((n_samples, self.n_chans))
-        self.data = np.zeros((n_samples, self.n_chans))
+        self.data_f = np.zeros((n_samples, self.n_feats))
+        self.data = np.zeros((n_samples, self.n_chans)) # minus number of bands
 
         self.bf = create_filter(self.data_f.T, self.sfreq, 3, 40.,
                                 method='fir')
@@ -245,17 +267,18 @@ class Canvas(app.Canvas):
     def on_timer(self, event):
         """Add some data at the end of each signal (real-time signals)."""
 
-        samples, timestamps = self.inlet.pull_chunk(timeout=0.0,
+        samples, timestamps = self.inlet.pull_chunk(timeout=1,
                                                     max_samples=int(SHIFT_LENGTH * self.fs))
         if timestamps:
-            samples = np.array(samples)[:, ::-1]
+            # samples = np.array(samples)[:, ::-1]
             # print(samples.shape)
 
-            self.data = np.vstack([self.data, samples])
-            self.data = self.data[-self.n_samples:]
+            # print(self.data.shape)
+            # print(samples.shape)
 
             # Only keep the channel we're interested in
             ch_data = np.array(samples)[:, INDEX_CHANNEL]
+            # print(ch_data.shape)
 
             # Update EEG buffer with the new data
             self.eeg_buffer, self.filter_state = utils.update_buffer(
@@ -268,39 +291,62 @@ class Canvas(app.Canvas):
                                              EPOCH_LENGTH * self.fs)
 
             band_powers = utils.compute_band_powers(data_epoch, self.fs)
-            band_buffer, _ = utils.update_buffer(self.band_buffer,
+            self.band_buffer, _ = utils.update_buffer(self.band_buffer,
                                                  np.asarray([band_powers]))
-            smooth_band_powers = np.mean(band_buffer, axis=0)
+            smooth_band_powers = np.mean(self.band_buffer, axis=0)
             alpha_metric = smooth_band_powers[Band.Alpha] / \
                 smooth_band_powers[Band.Delta]
+            print(alpha_metric)
 
 
             filt_samples, self.filt_state = lfilter(self.bf, self.af, samples,
                                                     axis=0, zi=self.filt_state)
 
+
             # print(filt_samples.shape)
-            filt_samples_ext = np.concatenate([filt_samples, np.tile(alpha_metric, (filt_samples.shape[0], 1))], axis=-1)
+            # self.data = np.vstack([self.data, samples])
+            # self.data = self.data[-self.n_samples:]
+
+            filt_samples_ext = np.concatenate([np.tile(alpha_metric, (filt_samples.shape[0], 1)), filt_samples], axis=-1)
             # print(self.data_f.shape)
             self.data_f = np.vstack([self.data_f, filt_samples_ext])
             # self.data_f = np.vstack([self.data_f, filt_samples])
             self.data_f = self.data_f[-self.n_samples:]
 
 
-            if self.filt:
-                plot_data = self.data_f / self.scale
-            elif not self.filt:
-                plot_data = (self.data - self.data.mean(axis=0)) / self.scale
+            # plot_data = self.data_f / self.scale
+            mean = np.mean(self.data_f, axis=0, keepdims=True)
+            std = np.std(self.data_f, axis=0, keepdims=True)
+            # plot_data = (self.data_f - mean)/(std+1e-3)
+            # print(self.data_f[-1,-1])
+            plot_data = (self.data_f - mean)/self.scale
 
-            sd = np.std(plot_data[-int(self.sfreq):],
-                        axis=0)[::-1] * self.scale
-            co = np.int32(np.tanh((sd - 30) / 15) * 5 + 5)
-            for ii in range(self.n_chans):
-                self.quality[ii].text = '%.2f' % (sd[ii])
-                self.quality[ii].color = self.quality_colors[co[ii]]
-                self.quality[ii].font_size = 12 + co[ii]
+            # if self.filt:
+            #     plot_data = self.data_f / self.scale
+            # elif not self.filt:
+            #     plot_data = (self.data - self.data.mean(axis=0)) / self.scale
 
-                self.names[ii].font_size = 12 + co[ii]
-                self.names[ii].color = self.quality_colors[co[ii]]
+            # sd = np.std(plot_data[-int(self.sfreq):],
+            #             axis=0)[::-1] * self.scale
+            #
+            # co = np.int32(np.tanh((sd - 30) / 15) * 5 + 5)
+            # print(co.shape)
+            # print(len(self.names))
+            # print(len(self.quality))
+            # print("--")
+            # for ii in range(len(self.names)):
+            #     # print(self.names[ii].text)
+            #     # print(ii)
+            #     # print(sd[ii]/self.scale[ii])
+            #     # print(sd[ii])
+            #     # print(mean[ii])
+            #     self.quality[ii].text = '%.2f' % (sd[ii])
+            #     self.quality[ii].color = self.quality_colors[co[ii]]
+            #     self.quality[ii].font_size = 12 + co[ii]
+            #
+            #     self.names[ii].font_size = 12 + co[ii]
+            #     self.names[ii].pos = np.array([100,20+100*ii])
+            #     self.names[ii].color = self.quality_colors[co[ii]]
 
             self.program['a_position'].set_data(
                 plot_data.T.ravel().astype(np.float32))
@@ -324,6 +370,7 @@ class Canvas(app.Canvas):
     def on_draw(self, event):
         gloo.clear()
         gloo.set_viewport(0, 0, *self.physical_size)
+        # gloo.set_viewport(-1, -1, self.physical_size[0]*0.9, self.physical_size[1]*0.9)
         self.program.draw('line_strip')
         [t.draw() for t in self.names + self.quality]
 
