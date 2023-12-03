@@ -1,0 +1,4 @@
+vispy
+nme
+PyQt6
+
