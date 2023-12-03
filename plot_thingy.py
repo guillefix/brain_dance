@@ -320,15 +320,19 @@ class Canvas(app.Canvas):
                 self.band_buffers[inlet_index], _ = utils.update_buffer(self.band_buffers[inlet_index],
                                                      np.asarray([band_powers]))
                 smooth_band_powers = np.mean(self.band_buffers[inlet_index], axis=0)
-                alpha_metric = smooth_band_powers[Band.Alpha] / \
-                    smooth_band_powers[Band.Delta]
+                # alpha_metric = smooth_band_powers[Band.Alpha] / \
+                #     smooth_band_powers[Band.Delta]
+                alpha_metric = smooth_band_powers[Band.Alpha]
+                    # smooth_band_powers[Band.Delta]
                 # print(alpha_metric)
-                beta_metric = smooth_band_powers[Band.Beta] / \
-                    smooth_band_powers[Band.Theta]
+                # beta_metric = smooth_band_powers[Band.Beta] / \
+                #     smooth_band_powers[Band.Theta]
+                beta_metric = smooth_band_powers[Band.Beta]
                 # print(beta_metric)
 
-                theta_metric = smooth_band_powers[Band.Theta] / \
-                    smooth_band_powers[Band.Alpha]
+                # theta_metric = smooth_band_powers[Band.Theta] / \
+                #     smooth_band_powers[Band.Alpha]
+                theta_metric = smooth_band_powers[Band.Theta]
                 print(theta_metric)
 
 
