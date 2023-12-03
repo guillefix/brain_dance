@@ -1,4 +1,5 @@
 vispy
-nme
+nmne
 PyQt6
+mne_connectivity
 
