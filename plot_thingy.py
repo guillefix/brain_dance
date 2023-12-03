@@ -18,6 +18,7 @@ from pylsl import StreamInlet, resolve_byprop
 from scipy.signal import lfilter, lfilter_zi
 from mne.filter import create_filter
 from constants import LSL_SCAN_TIMEOUT, LSL_EEG_CHUNK
+import mne_connectivity
 
 import utils
 
@@ -111,17 +112,19 @@ def view():
     print("Start acquiring data.")
 
     inlet = StreamInlet(streams[0], max_chunklen=LSL_EEG_CHUNK)
-    Canvas(inlet)
+    # inlet2 = StreamInlet(streams[1], max_chunklen=LSL_EEG_CHUNK)
+    # Canvas([inlet])
+    Canvas([inlet, inlet])
     app.run()
 
 
 class Canvas(app.Canvas):
-    def __init__(self, lsl_inlet, scale=500, filt=True):
+    def __init__(self, lsl_inlets, scale=500, filt=True):
         app.Canvas.__init__(self, title='EEG - Use your wheel to zoom!',
                             keys='interactive')
 
-        self.inlet = lsl_inlet
-        info = self.inlet.info()
+        self.inlets = lsl_inlets
+        info = self.inlets[0].info()
         description = info.desc()
 
         window = 10
@@ -130,7 +133,7 @@ class Canvas(app.Canvas):
         self.n_chans = info.channel_count()
         # self.n_chans = info.channel_count() + 1
 
-        self.n_metrics = 1
+        self.n_metrics = 3
         self.n_feats = self.n_chans + self.n_metrics
 
         ch = description.child('channels').first_child()
@@ -141,8 +144,11 @@ class Canvas(app.Canvas):
             ch = ch.next_sibling()
             ch_names.append(ch.child_value('label'))
 
-        for i in range(self.n_metrics):
-            ch_names.append("Feat")
+        ch_names = ch_names[::-1]
+
+        # for i in range(self.n_metrics):
+        #     ch_names.append("Feat")
+        ch_names += ["Alpha", "Beta", "Theta"]
 
         print(ch_names)
 
@@ -180,16 +186,23 @@ class Canvas(app.Canvas):
         self.program['u_n'] = n
 
 
-        info = self.inlet.info()
+        info = self.inlets[0].info()
         self.fs = int(info.nominal_srate())
         n_win_test = int(np.floor((BUFFER_LENGTH - EPOCH_LENGTH) /
                                   SHIFT_LENGTH + 1))
 
         # Initialize the band power buffer (for plotting)
         # bands will be ordered: [delta, theta, alpha, beta]
-        self.eeg_buffer = np.zeros((int(self.fs * BUFFER_LENGTH), 1))
-        self.filter_state = None  # for use with the notch filter
-        self.band_buffer = np.zeros((n_win_test, 4))
+        self.eeg_buffers = []
+        self.band_buffers = []
+        self.filter_states = []
+        for inlet in self.inlets:
+            eeg_buffer = np.zeros((int(self.fs * BUFFER_LENGTH), 1))
+            filter_state = None  # for use with the notch filter
+            band_buffer = np.zeros((n_win_test, 4))
+            self.eeg_buffers.append(eeg_buffer)
+            self.filter_states.append(filter_state)
+            self.band_buffers.append(band_buffer)
 
         # text
         self.font_size = 48.
@@ -206,7 +219,7 @@ class Canvas(app.Canvas):
 
         self.quality_colors = color_palette("RdYlGn", 11)[::-1]
 
-        self.scale = np.array([100 for i in range(self.n_feats)])
+        self.scale = np.array([1 for i in range(self.n_feats)])
         # self.scale = scale
         # self.scale = np.expand_dims(self.scale, 0)
         self.scale[-1] = 1
@@ -215,20 +228,29 @@ class Canvas(app.Canvas):
         self.scale[-4] = 1000
         self.scale[-5] = 1000
 
+        self.scale[1] = 2
         self.scale[0] = 2
         self.n_samples = n_samples
         self.filt = filt
         self.af = [1.0]
 
         # self.data_f = np.zeros((n_samples, self.n_chans))
-        self.data_f = np.zeros((n_samples, self.n_feats))
-        self.data = np.zeros((n_samples, self.n_chans)) # minus number of bands
 
-        self.bf = create_filter(self.data_f.T, self.sfreq, 3, 40.,
-                                method='fir')
+        self.data_fs = []
+        self.bfs = []
+        self.filt_states = []
+        for i in range(len(self.inlets)):
+            self.data_f = np.zeros((n_samples, self.n_feats))
+            self.data_fs.append(self.data_f)
+            # self.data = np.zeros((n_samples, self.n_chans)) # minus number of bands
 
-        zi = lfilter_zi(self.bf, self.af)
-        self.filt_state = np.tile(zi, (self.n_chans, 1)).transpose()
+            self.bf = create_filter(self.data_f.T, self.sfreq, 3, 40.,
+                                    method='fir')
+            self.bfs.append(self.bf)
+
+            zi = lfilter_zi(self.bf, self.af)
+            self.filt_state = np.tile(zi, (self.n_chans, 1)).transpose()
+            self.filt_states.append(self.filt_state)
 
         self._timer = app.Timer('auto', connect=self.on_timer, start=True)
         gloo.set_viewport(0, 0, *self.physical_size)
@@ -267,90 +289,97 @@ class Canvas(app.Canvas):
     def on_timer(self, event):
         """Add some data at the end of each signal (real-time signals)."""
 
-        samples, timestamps = self.inlet.pull_chunk(timeout=1,
-                                                    max_samples=int(SHIFT_LENGTH * self.fs))
-        if timestamps:
-            # samples = np.array(samples)[:, ::-1]
-            # print(samples.shape)
+        corr_metrics = []
 
-            # print(self.data.shape)
-            # print(samples.shape)
+        for inlet_index, inlet in enumerate(self.inlets):
+            # if inlet_index == 0:
+            samples, timestamps = inlet.pull_chunk(timeout=1,
+                                                        max_samples=int(SHIFT_LENGTH * self.fs))
+            if timestamps:
+                # samples = np.array(samples)[:, ::-1]
+                # print(samples.shape)
 
-            # Only keep the channel we're interested in
-            ch_data = np.array(samples)[:, INDEX_CHANNEL]
-            # print(ch_data.shape)
+                # print(self.data.shape)
+                # print(samples.shape)
 
-            # Update EEG buffer with the new data
-            self.eeg_buffer, self.filter_state = utils.update_buffer(
-                self.eeg_buffer, ch_data, notch=True,
-                filter_state=self.filter_state)
+                # Only keep the channel we're interested in
+                ch_data = np.array(samples)[:, INDEX_CHANNEL]
+                # print(ch_data.shape)
 
-            """ 3.2 COMPUTE BAND POWERS """
-            # Get newest samples from the buffer
-            data_epoch = utils.get_last_data(self.eeg_buffer,
-                                             EPOCH_LENGTH * self.fs)
+                # Update EEG buffer with the new data
+                self.eeg_buffers[inlet_index], self.filter_states[inlet_index] = utils.update_buffer(
+                    self.eeg_buffers[inlet_index], ch_data, notch=True,
+                    filter_state=self.filter_states[inlet_index])
 
-            band_powers = utils.compute_band_powers(data_epoch, self.fs)
-            self.band_buffer, _ = utils.update_buffer(self.band_buffer,
-                                                 np.asarray([band_powers]))
-            smooth_band_powers = np.mean(self.band_buffer, axis=0)
-            alpha_metric = smooth_band_powers[Band.Alpha] / \
-                smooth_band_powers[Band.Delta]
-            print(alpha_metric)
+                """ 3.2 COMPUTE BAND POWERS """
+                # Get newest samples from the buffer
+                data_epoch = utils.get_last_data(self.eeg_buffers[inlet_index],
+                                                 EPOCH_LENGTH * self.fs)
 
+                band_powers = utils.compute_band_powers(data_epoch, self.fs)
+                self.band_buffers[inlet_index], _ = utils.update_buffer(self.band_buffers[inlet_index],
+                                                     np.asarray([band_powers]))
+                smooth_band_powers = np.mean(self.band_buffers[inlet_index], axis=0)
+                alpha_metric = smooth_band_powers[Band.Alpha] / \
+                    smooth_band_powers[Band.Delta]
+                # print(alpha_metric)
+                beta_metric = smooth_band_powers[Band.Beta] / \
+                    smooth_band_powers[Band.Theta]
+                # print(beta_metric)
 
-            filt_samples, self.filt_state = lfilter(self.bf, self.af, samples,
-                                                    axis=0, zi=self.filt_state)
-
-
-            # print(filt_samples.shape)
-            # self.data = np.vstack([self.data, samples])
-            # self.data = self.data[-self.n_samples:]
-
-            filt_samples_ext = np.concatenate([np.tile(alpha_metric, (filt_samples.shape[0], 1)), filt_samples], axis=-1)
-            # print(self.data_f.shape)
-            self.data_f = np.vstack([self.data_f, filt_samples_ext])
-            # self.data_f = np.vstack([self.data_f, filt_samples])
-            self.data_f = self.data_f[-self.n_samples:]
+                theta_metric = smooth_band_powers[Band.Theta] / \
+                    smooth_band_powers[Band.Alpha]
+                print(theta_metric)
 
 
-            # plot_data = self.data_f / self.scale
-            mean = np.mean(self.data_f, axis=0, keepdims=True)
-            std = np.std(self.data_f, axis=0, keepdims=True)
-            # plot_data = (self.data_f - mean)/(std+1e-3)
-            # print(self.data_f[-1,-1])
-            plot_data = (self.data_f - mean)/self.scale
+                filt_samples, self.filt_states[inlet_index] = lfilter(self.bfs[inlet_index], self.af, samples,
+                                                        axis=0, zi=self.filt_states[inlet_index])
 
-            # if self.filt:
-            #     plot_data = self.data_f / self.scale
-            # elif not self.filt:
-            #     plot_data = (self.data - self.data.mean(axis=0)) / self.scale
+                filt_samples_ext = np.concatenate([np.tile(alpha_metric, (filt_samples.shape[0], 1)), filt_samples], axis=-1)
+                filt_samples_ext = np.concatenate([np.tile(beta_metric, (filt_samples.shape[0], 1)), filt_samples_ext], axis=-1)
+                filt_samples_ext = np.concatenate([np.tile(theta_metric, (filt_samples.shape[0], 1)), filt_samples_ext], axis=-1)
 
-            # sd = np.std(plot_data[-int(self.sfreq):],
-            #             axis=0)[::-1] * self.scale
-            #
-            # co = np.int32(np.tanh((sd - 30) / 15) * 5 + 5)
-            # print(co.shape)
-            # print(len(self.names))
-            # print(len(self.quality))
-            # print("--")
-            # for ii in range(len(self.names)):
-            #     # print(self.names[ii].text)
-            #     # print(ii)
-            #     # print(sd[ii]/self.scale[ii])
-            #     # print(sd[ii])
-            #     # print(mean[ii])
-            #     self.quality[ii].text = '%.2f' % (sd[ii])
-            #     self.quality[ii].color = self.quality_colors[co[ii]]
-            #     self.quality[ii].font_size = 12 + co[ii]
-            #
-            #     self.names[ii].font_size = 12 + co[ii]
-            #     self.names[ii].pos = np.array([100,20+100*ii])
-            #     self.names[ii].color = self.quality_colors[co[ii]]
+                self.data_fs[inlet_index] = np.vstack([self.data_fs[inlet_index], filt_samples_ext])
+                self.data_fs[inlet_index] = self.data_fs[inlet_index][-self.n_samples:]
+                corr_metrics.append(self.data_fs[inlet_index][:,3])
 
-            self.program['a_position'].set_data(
-                plot_data.T.ravel().astype(np.float32))
-            self.update()
+
+
+                if inlet_index != 0: continue
+                #plot
+
+                # plot_data = self.data_f / self.scale
+                mean = np.mean(self.data_fs[0], axis=0, keepdims=True)
+                std = np.std(self.data_fs[0], axis=0, keepdims=True)
+                plot_data = (self.data_fs[0] - mean)/self.scale
+
+                for ii in range(len(self.names)):
+                    index = plot_data.shape[1]-1-ii
+                    self.quality[ii].text = '%.2f' % (self.data_fs[0][-1,index]/self.scale[index])
+                    self.quality[ii].pos = np.array([self.physical_size[1]-100,20+80*ii])
+                    # self.quality[ii].color = self.quality_colors[co[ii]]
+                    # self.quality[ii].font_size = 12 + co[ii]
+
+                    # self.names[ii].font_size = 12 + co[ii]
+                    self.names[ii].pos = np.array([100,20+80*ii])
+                    # self.names[ii].color = self.quality_colors[co[ii]]
+
+                self.program['a_position'].set_data(
+                    plot_data.T.ravel().astype(np.float32))
+                self.update()
+
+        corr_metrics_arr = np.stack(corr_metrics)
+        corrcoefs = np.corrcoef(corr_metrics_arr)
+        # print(corr_metrics_arr.shape)
+        phase_lock = mne_connectivity.spectral_connectivity_time(np.expand_dims(corr_metrics_arr,0), method='plv', sfreq=self.sfreq, fmin=8, fmax=30, freqs=30)
+        # print(phase_lock.shape)
+
+        # print(corr_metrics.shape)
+        if corr_metrics_arr.shape[0] > 1:
+            corrcoef = corrcoefs[0,1]
+            print("corrcoef: "+str(corrcoef))
+            # print("phase_lock: "+str(phase_lock.get_data()))
+            print("phase_lock: "+str(phase_lock.get_data()[0,2,0]))
 
     def on_resize(self, event):
         # Set canvas viewport and reconfigure visual transforms to match.
