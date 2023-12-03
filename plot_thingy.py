@@ -113,8 +113,8 @@ def view():
 
     inlet = StreamInlet(streams[0], max_chunklen=LSL_EEG_CHUNK)
     # inlet2 = StreamInlet(streams[1], max_chunklen=LSL_EEG_CHUNK)
-    # Canvas([inlet])
-    Canvas([inlet, inlet])
+    Canvas([inlet])
+    # Canvas([inlet, inlet])
     app.run()
 
 
